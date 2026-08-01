@@ -6,6 +6,14 @@ router = APIRouter(tags=["Conversões"])
 service = ConversionService()
 MAX_FILE_SIZE = 5 * 1024 * 1024
 
+async def read_ofx_file(file: UploadFile):
+    if not file.filename or not file.filename.lower().endswith(".ofx"):
+        raise HTTPException(400, "Invalid file extension.")
+    content = await file.read(MAX_FILE_SIZE + 1)
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(413, "File exceeds the maximum size.")
+    return content, file.filename
+
 @router.post("/conversions")
 async def create_conversion(file: UploadFile = File(...)):
     if not file.filename or not file.filename.lower().endswith(".ofx"):
@@ -17,6 +25,19 @@ async def create_conversion(file: UploadFile = File(...)):
         return service.create(content, file.filename)
     except ConversionError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+@router.post("/conversions/export-file")
+async def export_file(file: UploadFile = File(...)):
+    content, filename = await read_ofx_file(file)
+    try:
+        xlsx, output_filename = service.convert_to_xlsx(content, filename)
+    except ConversionError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return Response(
+        xlsx,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{output_filename}"'},
+    )
 
 @router.get("/conversions/{conversion_id}")
 def get_conversion(conversion_id: str):

@@ -31,6 +31,15 @@ class ConversionService:
         self._items[conversion_id] = record
         return self._public(conversion_id, record)
 
+    def convert_to_xlsx(self, raw: bytes, original_filename: str) -> tuple[bytes, str]:
+        """Converts in one request so it works on stateless serverless functions."""
+        text = self._decode(raw)
+        transactions = self._parse(text)
+        if not transactions:
+            raise ConversionError("No transaction was found in the OFX file.")
+        rows, _ = self._normalize(transactions)
+        return self._build_xlsx(rows), self._filename(original_filename)
+
     def get(self, conversion_id: str):
         self._purge_expired()
         record = self._items.get(conversion_id)

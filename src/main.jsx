@@ -39,19 +39,22 @@ function App() {
   }
 
   async function download() {
-    if (!conversion) return;
+    if (!conversion || !file) return;
     setStatus('exporting');
     setError('');
+    const form = new FormData();
+    form.append('file', file);
     try {
-      const response = await fetch(`/api/v1/conversions/${conversion.id}/export`, { method: 'POST' });
+      const response = await fetch('/api/v1/conversions/export-file', { method: 'POST', body: form });
       if (!response.ok) throw new Error(await readApiError(response));
-      const exportData = await response.json();
       const link = document.createElement('a');
-      link.href = exportData.download_url;
-      link.download = exportData.filename;
+      const objectUrl = URL.createObjectURL(await response.blob());
+      link.href = objectUrl;
+      link.download = `${file.name.replace(/\.ofx$/i, '') || 'extrato'}_convertido.xlsx`;
       document.body.appendChild(link);
       link.click();
       link.remove();
+      URL.revokeObjectURL(objectUrl);
       setStatus('ready');
     } catch (err) {
       setError(err.message);
