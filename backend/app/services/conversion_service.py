@@ -1,7 +1,9 @@
 from __future__ import annotations
 import io
+import csv
 import re
 import uuid
+from urllib.request import urlopen
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from html import unescape
@@ -12,6 +14,13 @@ from openpyxl.styles import Font, PatternFill
 EXPIRATION = timedelta(minutes=60)
 TAG_PATTERN = re.compile(r"<([A-Za-z0-9_]+)>([^<\r\n]*)", re.IGNORECASE)
 TRANSACTION_PATTERN = re.compile(r"<STMTTRN>(.*?)(?:</STMTTRN>|(?=<STMTTRN>|</BANKTRANLIST>))", re.IGNORECASE | re.DOTALL)
+BANK_CATALOG_URL = "https://www.bcb.gov.br/content/estabilidadefinanceira/str1/ParticipantesSTR.csv"
+FALLBACK_BANK_NAMES = {
+    "001": "Banco do Brasil", "033": "Santander", "104": "Caixa",
+    "197": "Stone Pagamentos", "237": "Bradesco", "260": "Nubank",
+    "341": "Itaú", "748": "Sicredi", "756": "Sicoob",
+}
+_bank_names: dict[str, str] | None = None
 
 class ConversionError(Exception): pass
 
@@ -27,7 +36,8 @@ class ConversionService:
             raise ConversionError("Nenhuma transação foi encontrada no arquivo OFX.")
         normalized, warnings = self._normalize(transactions)
         conversion_id = str(uuid.uuid4())
-        record = {"rows": normalized, "warnings": warnings, "expires_at": datetime.now(timezone.utc) + EXPIRATION, "filename": self._filename(original_filename), "xlsx": None}
+        account = self._account_details(text)
+        record = {"rows": normalized, "warnings": warnings, "account": account, "expires_at": datetime.now(timezone.utc) + EXPIRATION, "filename": self._filename(original_filename, account), "xlsx": None}
         self._items[conversion_id] = record
         return self._public(conversion_id, record)
 
@@ -38,7 +48,8 @@ class ConversionService:
         if not transactions:
             raise ConversionError("No transaction was found in the OFX file.")
         rows, _ = self._normalize(transactions)
-        return self._build_xlsx(rows), self._filename(original_filename)
+        account = self._account_details(text)
+        return self._build_xlsx(rows), self._filename(original_filename, account)
 
     def get(self, conversion_id: str):
         self._purge_expired()
@@ -96,7 +107,7 @@ class ConversionService:
         dates = [row["date"] for row in rows if row["date"]]
         credits = sum((row["amount"] for row in rows if row["amount"] > 0), Decimal("0"))
         debits = sum((row["amount"] for row in rows if row["amount"] < 0), Decimal("0"))
-        return {"id": conversion_id, "status": "ready", "warnings": record["warnings"], "summary": {"transaction_count": len(rows), "period": f"{min(dates).strftime('%d/%m/%Y')} a {max(dates).strftime('%d/%m/%Y')}" if dates else None, "credits": self._money(credits), "debits": self._money(debits)}, "preview": [{"type": r["type"], "date": r["date"].strftime("%d/%m/%Y") if r["date"] else None, "amount": float(r["amount"]), "amount_formatted": self._money(r["amount"]), "identifier": r["identifier"], "description": r["description"]} for r in rows[:20]], "expires_at": record["expires_at"].isoformat()}
+        return {"id": conversion_id, "status": "ready", "filename": record["filename"], "warnings": record["warnings"], "summary": {"transaction_count": len(rows), "period": f"{min(dates).strftime('%d/%m/%Y')} a {max(dates).strftime('%d/%m/%Y')}" if dates else None, "credits": self._money(credits), "debits": self._money(debits), "bank": record["account"]["bank"], "agency": record["account"]["agency"], "account": record["account"]["account"]}, "preview": [{"type": r["type"], "date": r["date"].strftime("%d/%m/%Y") if r["date"] else None, "amount": float(r["amount"]), "amount_formatted": self._money(r["amount"]), "identifier": r["identifier"], "description": r["description"]} for r in rows[:20]], "expires_at": record["expires_at"].isoformat()}
 
     def _build_xlsx(self, rows):
         book = Workbook(); sheet = book.active; sheet.title = "Transações"
@@ -119,7 +130,46 @@ class ConversionService:
         now = datetime.now(timezone.utc)
         for key in [key for key, value in self._items.items() if value["expires_at"] <= now]: del self._items[key]
 
-    def _filename(self, original):
+    def _account_details(self, text: str) -> dict[str, str | None]:
+        values = {key.upper(): value.strip() for key, value in TAG_PATTERN.findall(text)}
+        bank_code = self._bank_code(values.get("BANKID"))
+        bank_name = self._bank_names().get(bank_code) if bank_code else None
+        return {"bank": bank_name or (f"Instituição não identificada ({bank_code})" if bank_code else None), "agency": values.get("BRANCHID") or None, "account": values.get("ACCTID") or None}
+
+    def _bank_code(self, value: str | None) -> str | None:
+        """Normaliza códigos como 0197 e 197 para o padrão COMPE de três dígitos."""
+        if not value:
+            return None
+        digits = re.sub(r"\D", "", value)
+        if not digits:
+            return None
+        return f"{int(digits):03d}" if len(digits) <= 4 else digits
+
+    def _bank_names(self) -> dict[str, str]:
+        global _bank_names
+        if _bank_names is not None:
+            return _bank_names
+        names = FALLBACK_BANK_NAMES.copy()
+        try:
+            with urlopen(BANK_CATALOG_URL, timeout=3) as response:
+                rows = csv.DictReader(io.TextIOWrapper(response, encoding="utf-8-sig"))
+                for row in rows:
+                    code = self._bank_code(row.get("Número_Código"))
+                    name = (row.get("Nome_Extenso") or "").strip()
+                    if code and name:
+                        names[code] = name
+        except OSError:
+            pass
+        _bank_names = names
+        return _bank_names
+
+    def _filename(self, original, account: dict[str, str | None] | None = None):
         base = re.sub(r"[^A-Za-z0-9._ -]", "_", original.rsplit(".", 1)[0]).strip(". ")
-        return f"{base or 'extrato'}_convertido.xlsx"
+        parts = [base or "extrato"]
+        if account:
+            if account["bank"]: parts.append(account["bank"])
+            if account["agency"]: parts.append(f"Agencia_{account['agency']}")
+            if account["account"]: parts.append(f"Conta_{account['account']}")
+        safe_parts = [re.sub(r"[^A-Za-z0-9._ -]", "_", part).strip(". ") for part in parts]
+        return f"{'_'.join(part for part in safe_parts if part)}_convertido.xlsx"
     def _money(self, amount): return f"R$ {amount:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")

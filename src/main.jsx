@@ -50,7 +50,7 @@ function App() {
       const link = document.createElement('a');
       const objectUrl = URL.createObjectURL(await response.blob());
       link.href = objectUrl;
-      link.download = `${file.name.replace(/\.ofx$/i, '') || 'extrato'}_convertido.xlsx`;
+      link.download = conversion.filename;
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -88,7 +88,7 @@ function App() {
         <div><p className="eyebrow">ARQUIVO ANALISADO</p><h2>{conversion.summary.transaction_count} transações encontradas</h2></div>
         <button className="primary" disabled={status === 'exporting'} onClick={download}>{status === 'exporting' ? 'Gerando Excel…' : 'Baixar Excel (.xlsx)'}</button>
       </div>
-      <div className="metrics"><Metric label="Período" value={conversion.summary.period || 'Não identificado'} /><Metric label="Créditos" value={conversion.summary.credits} /><Metric label="Débitos" value={conversion.summary.debits} /></div>
+      <div className="metrics"><Metric label="Banco" value={conversion.summary.bank || 'Não informado'} /><Metric label="Agência" value={conversion.summary.agency || 'Não informada'} /><Metric label="Conta" value={conversion.summary.account || 'Não informada'} /><Metric label="Período" value={conversion.summary.period || 'Não identificado'} /><Metric label="Créditos" value={conversion.summary.credits} /><Metric label="Débitos" value={conversion.summary.debits} /></div>
       {conversion.warnings.length > 0 && <div className="warnings">{conversion.warnings.map((warning) => <p key={warning}>⚠ {warning}</p>)}</div>}
       <div className="table-wrap"><table><thead><tr><th>Data</th><th>Tipo</th><th>Descrição</th><th className="amount">Valor</th></tr></thead><tbody>{conversion.preview.map((item, index) => <tr key={`${item.identifier}-${index}`}><td>{item.date || '—'}</td><td>{item.type || '—'}</td><td>{item.description || '—'}</td><td className={`amount ${item.amount < 0 ? 'negative' : 'positive'}`}>{item.amount_formatted}</td></tr>)}</tbody></table></div>
       <p className="footnote">Prévia de até 20 lançamentos. O arquivo convertido expira automaticamente em 60 minutos.</p>
