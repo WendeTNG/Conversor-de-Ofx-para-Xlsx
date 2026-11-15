@@ -9,48 +9,56 @@ async function readApiError(response) {
 
 function App() {
   const inputRef = useRef(null);
-  const [file, setFile] = useState(null);
-  const [conversion, setConversion] = useState(null);
+  const [files, setFiles] = useState([]);
+  const [results, setResults] = useState([]);
   const [status, setStatus] = useState('idle');
   const [error, setError] = useState('');
 
-  function selectFile(selected) {
-    setFile(selected ?? null);
-    setConversion(null);
+  const busy = status === 'processing' || status === 'exporting';
+
+  function selectFiles(selected) {
+    if (busy) return;
+    setFiles(Array.from(selected ?? []));
+    setResults([]);
     setError('');
     setStatus('idle');
   }
 
   async function convert() {
-    if (!file) return;
+    if (!files.length || busy) return;
     setStatus('processing');
     setError('');
-    const form = new FormData();
-    form.append('file', file);
-    try {
-      const response = await fetch('/api/v1/conversions', { method: 'POST', body: form });
-      if (!response.ok) throw new Error(await readApiError(response));
-      setConversion(await response.json());
-      setStatus('ready');
-    } catch (err) {
-      setError(err.message);
-      setStatus('idle');
+    setResults([]);
+    const completed = [];
+    for (const [index, file] of files.entries()) {
+      const form = new FormData();
+      form.append('file', file);
+      try {
+        const response = await fetch('/api/v1/conversions', { method: 'POST', body: form });
+        if (!response.ok) throw new Error(await readApiError(response));
+        completed.push({ index, file, conversion: await response.json() });
+      } catch (err) {
+        completed.push({ index, file, error: err.message });
+      }
+      setResults([...completed]);
     }
+    setStatus('ready');
   }
 
   async function download() {
-    if (!conversion || !file) return;
+    const converted = results.filter((result) => result.conversion);
+    if (!converted.length || busy) return;
     setStatus('exporting');
     setError('');
     const form = new FormData();
-    form.append('file', file);
+    converted.forEach(({ file }) => form.append('files', file));
     try {
-      const response = await fetch('/api/v1/conversions/export-file', { method: 'POST', body: form });
+      const response = await fetch('/api/v1/conversions/export-zip', { method: 'POST', body: form });
       if (!response.ok) throw new Error(await readApiError(response));
       const link = document.createElement('a');
       const objectUrl = URL.createObjectURL(await response.blob());
       link.href = objectUrl;
-      link.download = conversion.filename;
+      link.download = 'Planilhas Compactadas.zip';
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -70,28 +78,41 @@ function App() {
     <section className="hero">
       <p className="eyebrow">CONVERSÃO SEGURA</p>
       <h1>Seu extrato, em uma planilha pronta para usar.</h1>
-      <p className="subtitle">Envie um arquivo OFX, revise as transações e baixe o Excel. Seus dados não ficam armazenados permanentemente.</p>
+      <p className="subtitle">Envie seus arquivos OFX e baixe as planilhas Excel em um único ZIP. Seus dados não ficam armazenados permanentemente.</p>
     </section>
     <section className="card">
-      <input ref={inputRef} className="hidden" type="file" accept=".ofx,application/x-ofx,text/ofx,text/xml,application/xml" onChange={(e) => selectFile(e.target.files?.[0])} />
-      <div className="upload" onClick={() => inputRef.current?.click()} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); selectFile(e.dataTransfer.files?.[0]); }}>
+      <input ref={inputRef} className="hidden" type="file" multiple disabled={busy} accept=".ofx,application/x-ofx,text/ofx,text/xml,application/xml" onChange={(e) => selectFiles(e.target.files)} />
+      <div className="upload" aria-disabled={busy} onClick={() => { if (!busy) inputRef.current?.click(); }} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); selectFiles(e.dataTransfer.files); }}>
         <div className="upload-icon">↑</div>
-        {file ? <><strong>{file.name}</strong><span>{(file.size / 1024).toFixed(1)} KB · Clique para trocar</span></> : <><strong>Arraste seu arquivo OFX aqui</strong><span>ou clique para selecionar</span></>}
+        {files.length ? <><strong>{files.length} arquivo(s) selecionado(s)</strong><span>{(files.reduce((total, file) => total + file.size, 0) / 1024).toFixed(1)} KB · Clique para trocar a seleção</span></> : <><strong>Arraste seus arquivos OFX aqui</strong><span>ou clique para selecionar um ou mais arquivos</span></>}
       </div>
-      <button className="primary" disabled={!file || status === 'processing' || status === 'exporting'} onClick={convert}>
-        {status === 'processing' ? 'Processando extrato…' : 'Analisar arquivo'}
+      {files.length > 0 && <ul className="selected-files" aria-label="Arquivos selecionados">{files.map((file, index) => <li key={index}>{file.name}</li>)}</ul>}
+      <button className="primary" disabled={!files.length || busy} onClick={convert}>
+        {status === 'processing' ? `Processando arquivos… ${results.length}/${files.length}` : 'Analisar arquivos'}
       </button>
       {error && <p className="error" role="alert">{error}</p>}
     </section>
-    {conversion && <section className="results">
+    {results.length > 0 && <section className="results" aria-live="polite">
       <div className="result-top">
-        <div><p className="eyebrow">ARQUIVO ANALISADO</p><h2>{conversion.summary.transaction_count} transações encontradas</h2></div>
-        <button className="primary" disabled={status === 'exporting'} onClick={download}>{status === 'exporting' ? 'Gerando Excel…' : 'Baixar Excel (.xlsx)'}</button>
+        <div><p className="eyebrow">ARQUIVOS ANALISADOS</p><h2>{results.filter((result) => result.conversion).length} de {files.length} arquivo(s) convertido(s)</h2></div>
+        <button className="primary" disabled={busy || !results.some((result) => result.conversion)} onClick={download}>{status === 'exporting' ? 'Gerando ZIP…' : 'Baixar planilhas (.zip)'}</button>
       </div>
-      <div className="metrics"><Metric label="Banco" value={conversion.summary.bank || 'Não informado'} /><Metric label="Agência" value={conversion.summary.agency || 'Não informada'} /><Metric label="Conta" value={conversion.summary.account || 'Não informada'} /><Metric label="Período" value={conversion.summary.period || 'Não identificado'} /><Metric label="Créditos" value={conversion.summary.credits} /><Metric label="Débitos" value={conversion.summary.debits} /></div>
-      {conversion.warnings.length > 0 && <div className="warnings">{conversion.warnings.map((warning) => <p key={warning}>⚠ {warning}</p>)}</div>}
-      <div className="table-wrap"><table><thead><tr><th>Data</th><th>Tipo</th><th>Descrição</th><th className="amount">Valor</th></tr></thead><tbody>{conversion.preview.map((item, index) => <tr key={`${item.identifier}-${index}`}><td>{item.date || '—'}</td><td>{item.type || '—'}</td><td>{item.description || '—'}</td><td className={`amount ${item.amount < 0 ? 'negative' : 'positive'}`}>{item.amount_formatted}</td></tr>)}</tbody></table></div>
-      <p className="footnote">Prévia de até 20 lançamentos. O arquivo convertido expira automaticamente em 60 minutos.</p>
+      {results.some((result) => result.error) && <p className="footnote">O ZIP inclui apenas os arquivos convertidos com sucesso.</p>}
+      <ul className="file-list" aria-label="Arquivos analisados">
+        {results.map(({ index, file, conversion, error: fileError }) => <li className="file-row" key={index}>
+          <div className="file-name"><span>Arquivo</span><strong>{file.name}</strong></div>
+          {conversion ? <>
+            <div><span>Banco</span><strong>{conversion.summary.bank || 'Não informado'}</strong></div>
+            <div><span>Conta</span><strong>{conversion.summary.account || 'Não informada'}</strong></div>
+            <div className="file-details">
+              <p>{conversion.summary.transaction_count} transações encontradas</p>
+              <div className="metrics"><Metric label="Período" value={conversion.summary.period || 'Não identificado'} /><Metric label="Créditos" value={conversion.summary.credits} /><Metric label="Débitos" value={conversion.summary.debits} /></div>
+              {conversion.warnings.length > 0 && <div className="warnings">{conversion.warnings.map((warning, warningIndex) => <p key={warningIndex}>⚠ {warning}</p>)}</div>}
+            </div>
+          </> : <p className="error file-details" role="alert">{fileError}</p>}
+        </li>)}
+      </ul>
+      <p className="footnote">O arquivo convertido expira automaticamente em 60 minutos.</p>
     </section>}
   </main>;
 }

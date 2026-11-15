@@ -1,3 +1,6 @@
+import io
+from zipfile import ZIP_DEFLATED, ZipFile
+
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import Response
 from app.services.conversion_service import ConversionService, ConversionError
@@ -37,6 +40,33 @@ async def export_file(file: UploadFile = File(...)):
         xlsx,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{output_filename}"'},
+    )
+
+@router.post("/conversions/export-zip")
+async def export_zip(files: list[UploadFile] = File(...)):
+    if not files:
+        raise HTTPException(400, "Selecione pelo menos um arquivo OFX.")
+    output = io.BytesIO()
+    used_names = set()
+    with ZipFile(output, "w", compression=ZIP_DEFLATED) as archive:
+        for file in files:
+            content, filename = await read_ofx_file(file)
+            try:
+                xlsx, output_filename = service.convert_to_xlsx(content, filename)
+            except ConversionError as exc:
+                raise HTTPException(422, f"{filename}: {exc}") from exc
+            # Keep every spreadsheet when input names produce the same output name.
+            unique_name = output_filename
+            suffix = 2
+            while unique_name.casefold() in used_names:
+                unique_name = f"{output_filename[:-5]} ({suffix}).xlsx"
+                suffix += 1
+            used_names.add(unique_name.casefold())
+            archive.writestr(unique_name, xlsx)
+    return Response(
+        output.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="Planilhas Compactadas.zip"'},
     )
 
 @router.get("/conversions/{conversion_id}")
